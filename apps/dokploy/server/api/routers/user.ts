@@ -26,6 +26,7 @@ import {
 	session,
 	user,
 } from "@dokploy/server/db/schema";
+import { applications } from "@dokploy/server/db/schema/application";
 import {
 	hasPermission,
 	resolvePermissions,
@@ -33,7 +34,7 @@ import {
 import { hasValidLicense } from "@dokploy/server/services/proprietary/license-key";
 import { TRPCError } from "@trpc/server";
 import * as bcrypt from "bcrypt";
-import { and, asc, eq, gt, ne } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, ne } from "drizzle-orm";
 import { z } from "zod";
 import { audit } from "@/server/api/utils/audit";
 import {
@@ -461,6 +462,66 @@ export const userRouter = createTRPCRouter({
 					containerCommand: string;
 					containerCreated: string;
 				}[];
+			} catch (error) {
+				throw error;
+			}
+		}),
+
+	getContainersSummary: withPermission("monitoring", "read")
+		.input(
+			z.object({
+				metricsUrl: z.string(),
+				token: z.string(),
+				serverId: z.string().nullable().optional(),
+			}),
+		)
+		.query(async ({ input }) => {
+			try {
+				// Get apps for the given server from Dokploy DB
+				const apps = await db.query.applications.findMany({
+					where: input.serverId
+						? eq(applications.serverId, input.serverId)
+						: isNull(applications.serverId),
+					columns: {
+						applicationId: true,
+						name: true,
+						appName: true,
+						applicationStatus: true,
+					},
+				});
+
+				if (apps.length === 0) return [];
+
+				// Fetch latest metric for each app in parallel
+				const results = await Promise.allSettled(
+					apps.map(async (app) => {
+						try {
+							const url = new URL(
+								input.metricsUrl + "/metrics/containers",
+							);
+							url.searchParams.append("limit", "1");
+							url.searchParams.append("appName", app.appName);
+							const response = await fetch(url.toString(), {
+								headers: { Authorization: "Bearer " + input.token },
+								signal: AbortSignal.timeout(5000),
+							});
+							if (!response.ok) return { ...app, metric: null };
+							const data = await response.json();
+							return {
+								...app,
+								metric:
+									Array.isArray(data) && data.length > 0 ? data[0] : null,
+							};
+						} catch {
+							return { ...app, metric: null };
+						}
+					}),
+				);
+
+				return results
+					.filter((r) => r.status === "fulfilled")
+					// eslint-disable-next-line @typescript-eslint/no-explicit-any
+					.map((r) => (r as PromiseFulfilledResult<any>).value);
 			} catch (error) {
 				throw error;
 			}
