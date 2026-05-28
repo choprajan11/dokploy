@@ -1,4 +1,4 @@
-import { findServerById } from "@dokploy/server/services/server";
+import { findServerById, updateServerById } from "@dokploy/server/services/server";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import type { ContainerCreateOptions } from "dockerode";
 import { IS_CLOUD } from "../constants";
@@ -80,6 +80,45 @@ export const setupMonitoring = async (serverId: string) => {
 		console.log("Monitoring Started ");
 	} catch (error) {
 		console.log("Monitoring Not Found: Starting ", error);
+	}
+};
+
+// Auto-register an app in the server's monitoring include list on first successful deploy.
+// No-op if monitoring is not configured or the app is already listed.
+export const addAppToServerMonitoring = async (
+	appName: string,
+	serverId: string | null | undefined,
+) => {
+	if (!serverId) return;
+
+	try {
+		const srv = await findServerById(serverId);
+		const metricsConfig = srv?.metricsConfig;
+
+		// Only act when monitoring is actually set up (token present)
+		if (!metricsConfig?.server?.token) return;
+
+		const include: string[] =
+			metricsConfig.containers?.services?.include ?? [];
+
+		if (include.includes(appName)) return;
+
+		const updatedConfig = {
+			...metricsConfig,
+			containers: {
+				...metricsConfig.containers,
+				services: {
+					...metricsConfig.containers?.services,
+					include: [...include, appName],
+				},
+			},
+		};
+
+		await updateServerById(serverId, { metricsConfig: updatedConfig });
+		await setupMonitoring(serverId);
+	} catch (error) {
+		// Non-fatal — monitoring failure should never block a deployment
+		console.error("addAppToServerMonitoring failed:", error);
 	}
 };
 

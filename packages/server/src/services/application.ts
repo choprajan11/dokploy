@@ -6,6 +6,7 @@ import {
 	buildAppName,
 } from "@dokploy/server/db/schema";
 import { getAdvancedStats } from "@dokploy/server/monitoring/utils";
+import { addAppToServerMonitoring } from "@dokploy/server/setup/monitoring-setup";
 import {
 	getBuildCommand,
 	mechanizeDockerContainer,
@@ -224,6 +225,7 @@ export const deployApplication = async ({
 		await mechanizeDockerContainer(application);
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateApplicationStatus(applicationId, "done");
+		await addAppToServerMonitoring(application.appName, application.serverId);
 
 		await sendBuildSuccessNotifications({
 			projectName: application.environment.project.name,
@@ -315,6 +317,7 @@ export const rebuildApplication = async ({
 		await mechanizeDockerContainer(application);
 		await updateDeploymentStatus(deployment.deploymentId, "done");
 		await updateApplicationStatus(applicationId, "done");
+		await addAppToServerMonitoring(application.appName, application.serverId);
 
 		await sendBuildSuccessNotifications({
 			projectName: application.environment.project.name,
