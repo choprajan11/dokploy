@@ -29,7 +29,10 @@ import {
 import { applications } from "@dokploy/server/db/schema/application";
 import { environments } from "@dokploy/server/db/schema/environment";
 import { projects } from "@dokploy/server/db/schema/project";
-import { getAccessibleServerIds } from "@dokploy/server/services/server";
+import {
+	findServerById,
+	getAccessibleServerIds,
+} from "@dokploy/server/services/server";
 import {
 	hasPermission,
 	resolvePermissions,
@@ -339,13 +342,33 @@ export const userRouter = createTRPCRouter({
 				});
 			}
 
-			const result = await removeUserById(input.userId);
+			// Count how many organizations this user belongs to
+			const allMemberships = await db.query.member.findMany({
+				where: eq(member.userId, input.userId),
+				columns: { organizationId: true },
+			});
+
+			if (allMemberships.length > 1) {
+				// User is in other orgs — only remove them from this org, not globally
+				await db
+					.delete(member)
+					.where(
+						and(
+							eq(member.userId, input.userId),
+							eq(member.organizationId, ctx.session.activeOrganizationId || ""),
+						),
+					);
+			} else {
+				// Last org — fully delete the user account
+				await removeUserById(input.userId);
+			}
+
 			await audit(ctx, {
 				action: "delete",
 				resourceType: "user",
 				resourceId: input.userId,
 			});
-			return result;
+			return true;
 		}),
 	assignPermissions: withPermission("member", "update")
 		.input(apiAssignPermissions)
@@ -414,8 +437,6 @@ export const userRouter = createTRPCRouter({
 	getContainerMetrics: withPermission("monitoring", "read")
 		.input(
 			z.object({
-				url: z.string(),
-				token: z.string(),
 				appName: z.string(),
 				dataPoints: z.string(),
 			}),
@@ -432,7 +453,7 @@ export const userRouter = createTRPCRouter({
 					);
 				}
 
-				// Verify the requested app belongs to the user's organization
+				// Verify the app exists and belongs to the user's organization
 				const app = await db.query.applications.findFirst({
 					where: eq(applications.appName, input.appName),
 					with: {
@@ -442,7 +463,7 @@ export const userRouter = createTRPCRouter({
 					},
 				});
 				if (
-					app &&
+					!app ||
 					app.environment?.project?.organizationId !==
 						ctx.session.activeOrganizationId
 				) {
@@ -452,8 +473,10 @@ export const userRouter = createTRPCRouter({
 					});
 				}
 
-				// Verify the user has access to the server this app is on
-				if (app?.serverId) {
+				// Resolve monitoring URL + token server-side (never from client input)
+				let metricsBaseUrl: string;
+				let token: string;
+				if (app.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(app.serverId)) {
 						throw new TRPCError({
@@ -461,14 +484,21 @@ export const userRouter = createTRPCRouter({
 							message: "You do not have access to this server.",
 						});
 					}
+					const srv = await findServerById(app.serverId);
+					metricsBaseUrl = `http://${srv.ipAddress}:${srv.metricsConfig?.server?.port ?? 4500}`;
+					token = srv.metricsConfig?.server?.token ?? "";
+				} else {
+					const settings = await getWebServerSettings();
+					metricsBaseUrl = `http://${settings?.serverIp}:${settings?.metricsConfig?.server?.port ?? 4500}`;
+					token = settings?.metricsConfig?.server?.token ?? "";
 				}
 
-				const url = new URL(`${input.url}/metrics/containers`);
+				const url = new URL(`${metricsBaseUrl}/metrics/containers`);
 				url.searchParams.append("limit", input.dataPoints);
 				url.searchParams.append("appName", input.appName);
 				const response = await fetch(url.toString(), {
 					headers: {
-						Authorization: `Bearer ${input.token}`,
+						Authorization: `Bearer ${token}`,
 					},
 				});
 				if (!response.ok) {
@@ -505,14 +535,14 @@ export const userRouter = createTRPCRouter({
 	getContainersSummary: withPermission("monitoring", "read")
 		.input(
 			z.object({
-				metricsUrl: z.string(),
-				token: z.string(),
 				serverId: z.string().nullable().optional(),
 			}),
 		)
 		.query(async ({ input, ctx }) => {
 			try {
-				// Verify the user has access to the requested remote server
+				// Resolve monitoring URL + token server-side (never from client input)
+				let metricsBaseUrl: string;
+				let token: string;
 				if (input.serverId) {
 					const accessibleIds = await getAccessibleServerIds(ctx.session);
 					if (!accessibleIds.has(input.serverId)) {
@@ -521,6 +551,13 @@ export const userRouter = createTRPCRouter({
 							message: "You do not have access to this server.",
 						});
 					}
+					const srv = await findServerById(input.serverId);
+					metricsBaseUrl = `http://${srv.ipAddress}:${srv.metricsConfig?.server?.port ?? 4500}`;
+					token = srv.metricsConfig?.server?.token ?? "";
+				} else {
+					const settings = await getWebServerSettings();
+					metricsBaseUrl = `http://${settings?.serverIp}:${settings?.metricsConfig?.server?.port ?? 4500}`;
+					token = settings?.metricsConfig?.server?.token ?? "";
 				}
 
 				// Get apps for the given server, scoped to the user's organization
@@ -556,12 +593,12 @@ export const userRouter = createTRPCRouter({
 					apps.map(async (app) => {
 						try {
 							const url = new URL(
-								input.metricsUrl + "/metrics/containers",
+								metricsBaseUrl + "/metrics/containers",
 							);
 							url.searchParams.append("limit", "1");
 							url.searchParams.append("appName", app.appName);
 							const response = await fetch(url.toString(), {
-								headers: { Authorization: "Bearer " + input.token },
+								headers: { Authorization: "Bearer " + token },
 								signal: AbortSignal.timeout(5000),
 							});
 							if (!response.ok) return { ...app, metric: null };

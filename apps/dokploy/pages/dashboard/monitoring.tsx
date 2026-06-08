@@ -74,12 +74,10 @@ const Dashboard = () => {
 	const { data: containersSummary, isPending: containersPending } =
 		api.user.getContainersSummary.useQuery(
 			{
-				metricsUrl: metricsBaseUrl,
-				token: metricsConfig?.token ?? "",
 				serverId: metricsConfig?.serverId,
 			},
 			{
-				enabled: !!metricsConfig?.token && !!metricsBaseUrl,
+				enabled: !!metricsConfig,
 				refetchInterval: 30000,
 			},
 		);

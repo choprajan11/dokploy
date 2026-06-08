@@ -1,6 +1,9 @@
+import { db } from "@dokploy/server/db";
+import { server } from "@dokploy/server/db/schema";
 import { findServerById, updateServerById } from "@dokploy/server/services/server";
 import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
 import type { ContainerCreateOptions } from "dockerode";
+import { eq, sql } from "drizzle-orm";
 import { IS_CLOUD } from "../constants";
 import { getDokployImageTag } from "../services/settings";
 import { pullImage, pullRemoteImage } from "../utils/docker/utils";
@@ -84,6 +87,8 @@ export const setupMonitoring = async (serverId: string) => {
 };
 
 // Auto-register an app in the server's monitoring include list on first successful deploy.
+// Uses a single atomic SQL statement to avoid a read-modify-write race when two apps
+// deploy to the same server simultaneously.
 // No-op if monitoring is not configured or the app is already listed.
 export const addAppToServerMonitoring = async (
 	appName: string,
@@ -93,28 +98,39 @@ export const addAppToServerMonitoring = async (
 
 	try {
 		const srv = await findServerById(serverId);
-		const metricsConfig = srv?.metricsConfig;
 
 		// Only act when monitoring is actually set up (token present)
-		if (!metricsConfig?.server?.token) return;
+		if (!srv?.metricsConfig?.server?.token) return;
 
-		const include: string[] =
-			metricsConfig.containers?.services?.include ?? [];
+		// Atomically append appName to the include array only if not already present.
+		// jsonb_set + || avoids a separate read and eliminates the concurrent-write race.
+		await db
+			.update(server)
+			.set({
+				metricsConfig: sql`jsonb_set(
+					"metricsConfig",
+					'{containers,services,include}',
+					(
+						CASE
+							WHEN "metricsConfig" #> '{containers,services,include}' IS NULL
+								THEN '[]'::jsonb
+							ELSE "metricsConfig" #> '{containers,services,include}'
+						END
+					) || CASE
+						WHEN (
+							CASE
+								WHEN "metricsConfig" #> '{containers,services,include}' IS NULL
+									THEN '[]'::jsonb
+								ELSE "metricsConfig" #> '{containers,services,include}'
+							END
+						) @> ${JSON.stringify([appName])}::jsonb
+						THEN '[]'::jsonb
+						ELSE ${JSON.stringify([appName])}::jsonb
+					END
+				)`,
+			})
+			.where(eq(server.serverId, serverId));
 
-		if (include.includes(appName)) return;
-
-		const updatedConfig = {
-			...metricsConfig,
-			containers: {
-				...metricsConfig.containers,
-				services: {
-					...metricsConfig.containers?.services,
-					include: [...include, appName],
-				},
-			},
-		};
-
-		await updateServerById(serverId, { metricsConfig: updatedConfig });
 		await setupMonitoring(serverId);
 	} catch (error) {
 		// Non-fatal — monitoring failure should never block a deployment
