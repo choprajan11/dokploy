@@ -72,6 +72,13 @@ export const getUpdateData = async (
 
 		const currentImageTag = getDokployImageTag();
 
+		// Suppress update notifications for custom builds managed outside Docker Hub.
+		// Our self-hosted fork is tagged "custom" and is updated manually via git rebase
+		// + docker build, so comparing against Docker Hub semver is meaningless here.
+		if (currentImageTag === "custom") {
+			return DEFAULT_UPDATE_DATA;
+		}
+
 		// Special handling for canary and feature branches
 		// For development versions (canary/feature), don't perform update checks
 		// These are unstable versions that change frequently, and users on these
