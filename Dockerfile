@@ -39,18 +39,22 @@ RUN apt-get update && apt-get install -y curl unzip zip apache2-utils iproute2 r
 # Install docker
 RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh --version 28.5.2 && rm get-docker.sh && curl https://rclone.org/install.sh | bash
 
-# Install Nixpacks and tsx
-# | VERBOSE=1 VERSION=1.21.0 bash
-
+# Install Nixpacks and tsx.
+# Binaries are pre-downloaded to .docker-tools/ to avoid GitHub CDN timeouts
+# inside Docker BuildKit. Regenerate with:
+#   curl -L -o .docker-tools/nixpacks.tar.gz https://github.com/railwayapp/nixpacks/releases/download/v1.41.0/nixpacks-v1.41.0-x86_64-unknown-linux-musl.tar.gz
+#   tar -xzf .docker-tools/nixpacks.tar.gz -C .docker-tools/
 ARG NIXPACKS_VERSION=1.41.0
-RUN curl -sSL https://nixpacks.com/install.sh -o install.sh \
-    && chmod +x install.sh \
-    && ./install.sh \
-    && pnpm install -g tsx
+COPY .docker-tools/nixpacks /usr/local/bin/nixpacks
+RUN chmod +x /usr/local/bin/nixpacks && pnpm install -g tsx
 
-# Install Railpack
+# Install Railpack.
+# Regenerate with:
+#   curl -L -o .docker-tools/railpack.tar.gz https://github.com/railwayapp/railpack/releases/download/v0.15.4/railpack-v0.15.4-x86_64-unknown-linux-musl.tar.gz
+#   tar -xzf .docker-tools/railpack.tar.gz -C .docker-tools/
 ARG RAILPACK_VERSION=0.15.4
-RUN curl -sSL https://railpack.com/install.sh | bash
+COPY .docker-tools/railpack /usr/local/bin/railpack
+RUN chmod +x /usr/local/bin/railpack
 
 # Install buildpacks
 COPY --from=buildpacksio/pack:0.39.1 /usr/local/bin/pack /usr/local/bin/pack
