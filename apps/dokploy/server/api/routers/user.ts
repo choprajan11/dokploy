@@ -27,6 +27,9 @@ import {
 	user,
 } from "@dokploy/server/db/schema";
 import { applications } from "@dokploy/server/db/schema/application";
+import { environments } from "@dokploy/server/db/schema/environment";
+import { projects } from "@dokploy/server/db/schema/project";
+import { getAccessibleServerIds } from "@dokploy/server/services/server";
 import {
 	hasPermission,
 	resolvePermissions,
@@ -417,7 +420,7 @@ export const userRouter = createTRPCRouter({
 				dataPoints: z.string(),
 			}),
 		)
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
 			try {
 				if (!input.appName) {
 					throw new Error(
@@ -428,6 +431,38 @@ export const userRouter = createTRPCRouter({
 						].join("\n"),
 					);
 				}
+
+				// Verify the requested app belongs to the user's organization
+				const app = await db.query.applications.findFirst({
+					where: eq(applications.appName, input.appName),
+					with: {
+						environment: {
+							with: { project: { columns: { organizationId: true } } },
+						},
+					},
+				});
+				if (
+					app &&
+					app.environment?.project?.organizationId !==
+						ctx.session.activeOrganizationId
+				) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message: "You do not have access to this application.",
+					});
+				}
+
+				// Verify the user has access to the server this app is on
+				if (app?.serverId) {
+					const accessibleIds = await getAccessibleServerIds(ctx.session);
+					if (!accessibleIds.has(app.serverId)) {
+						throw new TRPCError({
+							code: "FORBIDDEN",
+							message: "You do not have access to this server.",
+						});
+					}
+				}
+
 				const url = new URL(`${input.url}/metrics/containers`);
 				url.searchParams.append("limit", input.dataPoints);
 				url.searchParams.append("appName", input.appName);
@@ -475,20 +510,44 @@ export const userRouter = createTRPCRouter({
 				serverId: z.string().nullable().optional(),
 			}),
 		)
-		.query(async ({ input }) => {
+		.query(async ({ input, ctx }) => {
 			try {
-				// Get apps for the given server from Dokploy DB
-				const apps = await db.query.applications.findMany({
-					where: input.serverId
-						? eq(applications.serverId, input.serverId)
-						: isNull(applications.serverId),
-					columns: {
-						applicationId: true,
-						name: true,
-						appName: true,
-						applicationStatus: true,
-					},
-				});
+				// Verify the user has access to the requested remote server
+				if (input.serverId) {
+					const accessibleIds = await getAccessibleServerIds(ctx.session);
+					if (!accessibleIds.has(input.serverId)) {
+						throw new TRPCError({
+							code: "FORBIDDEN",
+							message: "You do not have access to this server.",
+						});
+					}
+				}
+
+				// Get apps for the given server, scoped to the user's organization
+				const apps = await db
+					.select({
+						applicationId: applications.applicationId,
+						name: applications.name,
+						appName: applications.appName,
+						applicationStatus: applications.applicationStatus,
+					})
+					.from(applications)
+					.innerJoin(
+						environments,
+						eq(applications.environmentId, environments.environmentId),
+					)
+					.innerJoin(
+						projects,
+						eq(environments.projectId, projects.projectId),
+					)
+					.where(
+						and(
+							input.serverId
+								? eq(applications.serverId, input.serverId)
+								: isNull(applications.serverId),
+							eq(projects.organizationId, ctx.session.activeOrganizationId),
+						),
+					);
 
 				if (apps.length === 0) return [];
 
